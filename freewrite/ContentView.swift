@@ -1039,6 +1039,14 @@ struct ContentView: View {
         .onAppear {
             showingSidebar = false  // Hide sidebar by default
             loadExistingEntries()
+            NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+                if let window = NSApplication.shared.windows.first,
+                   let textView = window.contentView?.findSubview(ofType: NSTextView.self),
+                   let scrollView = textView.enclosingScrollView {
+                    scrollView.scrollWheel(with: event)
+                }
+                return event
+            }
         }
         .onChange(of: text) { _ in
             // Save current entry when text changes
