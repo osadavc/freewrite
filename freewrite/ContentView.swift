@@ -10,6 +10,7 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 import PDFKit
+import LocalAuthentication
 
 struct HumanEntry: Identifiable {
     let id: UUID
@@ -43,8 +44,12 @@ struct HeartEmoji: Identifiable {
     var offset: CGFloat = 0
 }
 
+
+
 struct ContentView: View {
     private let headerString = "\n\n"
+    @StateObject private var authManager = AuthenticationManager()
+    private var encryptionManager: EncryptionManager { EncryptionManager(authManager: authManager) }
     @State private var entries: [HumanEntry] = []
     @State private var text: String = ""  // Remove initial welcome text since we'll handle it in createNewEntry
     
@@ -234,7 +239,17 @@ struct ContentView: View {
                 
                 // Read file contents for preview
                 do {
-                    let content = try String(contentsOf: fileURL, encoding: .utf8)
+                    let encryptedData = try Data(contentsOf: fileURL)
+                    var content: String
+                    
+                    // Try to decrypt the data
+                    do {
+                        content = try encryptionManager.decryptToString(data: encryptedData)
+                    } catch {
+                        // If decryption fails, try to load as plain text (for backward compatibility)
+                        content = try String(contentsOf: fileURL, encoding: .utf8)
+                    }
+                    
                     let preview = content
                         .replacingOccurrences(of: "\n", with: " ")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -395,6 +410,13 @@ struct ContentView: View {
             ZStack {
                 Color(colorScheme == .light ? .white : .black)
                     .ignoresSafeArea()
+                
+                // Gray out the app when not authenticated
+                if !authManager.isAuthenticated {
+                    Color.black.opacity(0.6)
+                        .ignoresSafeArea()
+                        .zIndex(999) // Ensure it's on top
+                }
                 
               
                     TextEditor(text: Binding(
@@ -941,7 +963,6 @@ struct ContentView: View {
         .preferredColorScheme(colorScheme)
         .onAppear {
             showingSidebar = false  // Hide sidebar by default
-            loadExistingEntries()
             NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
                 if let window = NSApplication.shared.windows.first,
                    let textView = window.contentView?.findSubview(ofType: NSTextView.self),
@@ -950,10 +971,34 @@ struct ContentView: View {
                 }
                 return event
             }
+            
+            // Trigger authentication on app startup
+            if !authManager.isAuthenticated {
+                Task {
+                    await authManager.authenticate()
+                }
+            }
+        }
+        .onChange(of: authManager.isAuthenticated) { isAuthenticated in
+            if isAuthenticated {
+                // Only load entries if we don't already have them loaded
+                if entries.isEmpty {
+                    loadExistingEntries()
+                } else {
+                    // Re-authenticate but keep current state
+                    print("Re-authenticated, maintaining current state")
+                }
+            } else {
+                // Automatically trigger authentication when needed
+                Task {
+                    await authManager.authenticate()
+                }
+            }
         }
         .onChange(of: text) { _ in
-            // Save current entry when text changes
-            if let currentId = selectedEntryId,
+            // Save current entry when text changes (only if authenticated)
+            if authManager.isAuthenticated,
+               let currentId = selectedEntryId,
                let currentEntry = entries.first(where: { $0.id == currentId }) {
                 saveEntry(entry: currentEntry)
             }
@@ -976,6 +1021,16 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.willExitFullScreenNotification)) { _ in
             isFullscreen = false
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willResignActiveNotification)) { _ in
+            // Save current work before going to background
+            if authManager.isAuthenticated,
+               let currentId = selectedEntryId,
+               let currentEntry = entries.first(where: { $0.id == currentId }) {
+                saveEntry(entry: currentEntry)
+            }
+            // Clear authentication for security
+            authManager.isAuthenticated = false
+        }
     }
     
     private func backgroundColor(for entry: HumanEntry) -> Color {
@@ -993,7 +1048,17 @@ struct ContentView: View {
         let fileURL = documentsDirectory.appendingPathComponent(entry.filename)
         
         do {
-            let content = try String(contentsOf: fileURL, encoding: .utf8)
+            let encryptedData = try Data(contentsOf: fileURL)
+            var content: String
+            
+            // Try to decrypt the data
+            do {
+                content = try encryptionManager.decryptToString(data: encryptedData)
+            } catch {
+                // If decryption fails, try to load as plain text (for backward compatibility)
+                content = try String(contentsOf: fileURL, encoding: .utf8)
+            }
+            
             let preview = content
                 .replacingOccurrences(of: "\n", with: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1009,15 +1074,28 @@ struct ContentView: View {
     }
     
     private func saveEntry(entry: HumanEntry) {
+        guard authManager.isAuthenticated else {
+            print("Cannot save entry: User not authenticated")
+            return
+        }
+        
         let documentsDirectory = getDocumentsDirectory()
         let fileURL = documentsDirectory.appendingPathComponent(entry.filename)
         
+        print("Attempting to save entry to: \(fileURL.path)")
+        print("Entry text length: \(text.count)")
+        
         do {
-            try text.write(to: fileURL, atomically: true, encoding: .utf8)
-            print("Successfully saved entry: \(entry.filename)")
+            // Encrypt the text before saving
+            let encryptedData = try encryptionManager.encryptString(text)
+            print("Successfully encrypted data, size: \(encryptedData.count) bytes")
+            
+            try encryptedData.write(to: fileURL)
+            print("Successfully saved encrypted entry: \(entry.filename)")
             updatePreviewText(for: entry)  // Update preview after saving
         } catch {
-            print("Error saving entry: \(error)")
+            print("Error saving encrypted entry: \(error)")
+            print("Error details: \(error.localizedDescription)")
         }
     }
     
@@ -1027,8 +1105,17 @@ struct ContentView: View {
         
         do {
             if fileManager.fileExists(atPath: fileURL.path) {
-                text = try String(contentsOf: fileURL, encoding: .utf8)
-                print("Successfully loaded entry: \(entry.filename)")
+                let encryptedData = try Data(contentsOf: fileURL)
+                // Try to decrypt the data
+                do {
+                    text = try encryptionManager.decryptToString(data: encryptedData)
+                    print("Successfully loaded encrypted entry: \(entry.filename)")
+                } catch {
+                    // If decryption fails, try to load as plain text (for backward compatibility)
+                    print("Decryption failed, trying plain text: \(error)")
+                    text = try String(contentsOf: fileURL, encoding: .utf8)
+                    print("Successfully loaded plain text entry: \(entry.filename)")
+                }
             }
         } catch {
             print("Error loading entry: \(error)")
@@ -1166,7 +1253,16 @@ struct ContentView: View {
         
         do {
             // Read the content of the entry
-            let entryContent = try String(contentsOf: fileURL, encoding: .utf8)
+            let encryptedData = try Data(contentsOf: fileURL)
+            var entryContent: String
+            
+            // Try to decrypt the data
+            do {
+                entryContent = try encryptionManager.decryptToString(data: encryptedData)
+            } catch {
+                // If decryption fails, try to load as plain text (for backward compatibility)
+                entryContent = try String(contentsOf: fileURL, encoding: .utf8)
+            }
             
             // Extract a title from the entry content and add .pdf extension
             let suggestedFilename = extractTitleFromContent(entryContent, date: entry.date) + ".pdf"
