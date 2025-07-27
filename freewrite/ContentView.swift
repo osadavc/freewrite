@@ -416,6 +416,7 @@ struct ContentView: View {
                     Color.black.opacity(0.6)
                         .ignoresSafeArea()
                         .zIndex(999) // Ensure it's on top
+                        .transition(.opacity)
                 }
                 
               
@@ -988,11 +989,6 @@ struct ContentView: View {
                     // Re-authenticate but keep current state
                     print("Re-authenticated, maintaining current state")
                 }
-            } else {
-                // Automatically trigger authentication when needed
-                Task {
-                    await authManager.authenticate()
-                }
             }
         }
         .onChange(of: text) { _ in
@@ -1030,6 +1026,14 @@ struct ContentView: View {
             }
             // Clear authentication for security
             authManager.isAuthenticated = false
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // Immediately trigger authentication when app becomes active
+            if !authManager.isAuthenticated {
+                Task {
+                    await authManager.authenticate()
+                }
+            }
         }
     }
     
