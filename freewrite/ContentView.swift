@@ -49,8 +49,9 @@ struct HeartEmoji: Identifiable {
 struct ContentView: View {
     private let headerString = "\n\n"
     @StateObject private var authManager = AuthenticationManager()
-    private var encryptionManager: EncryptionManager { EncryptionManager(authManager: authManager) }
+    @State private var encryptionManager: EncryptionManager?
     @State private var entries: [HumanEntry] = []
+    @State private var showAuthOverlay = false // Control overlay visibility independently
     @State private var text: String = ""  // Remove initial welcome text since we'll handle it in createNewEntry
     
     @State private var isFullscreen = false
@@ -244,7 +245,7 @@ struct ContentView: View {
                     
                     // Try to decrypt the data
                     do {
-                        content = try encryptionManager.decryptToString(data: encryptedData)
+                        content = try encryptionManager!.decryptToString(data: encryptedData)
                     } catch {
                         // If decryption fails, try to load as plain text (for backward compatibility)
                         content = try String(contentsOf: fileURL, encoding: .utf8)
@@ -412,10 +413,11 @@ struct ContentView: View {
                     .ignoresSafeArea()
                 
                 // Gray out the app when not authenticated
-                if !authManager.isAuthenticated {
-                    Color.black.opacity(0.6)
+                if showAuthOverlay {
+                    Color.black.opacity(0.3)
                         .ignoresSafeArea()
                         .zIndex(999) // Ensure it's on top
+                        .allowsHitTesting(false) // Don't intercept clicks
                         .transition(.opacity)
                 }
                 
@@ -423,6 +425,8 @@ struct ContentView: View {
                     TextEditor(text: Binding(
                         get: { text },
                         set: { newValue in
+                            // Only allow text changes when authenticated
+                            guard authManager.isAuthenticated else { return }
                             // Ensure the text always starts with two newlines
                             if !newValue.hasPrefix("\n\n") {
                                 text = "\n\n" + newValue.trimmingCharacters(in: .newlines)
@@ -973,7 +977,8 @@ struct ContentView: View {
                 return event
             }
             
-            // Trigger authentication on app startup
+            // Initialize overlay and trigger authentication on app startup
+            showAuthOverlay = true
             if !authManager.isAuthenticated {
                 Task {
                     await authManager.authenticate()
@@ -982,6 +987,12 @@ struct ContentView: View {
         }
         .onChange(of: authManager.isAuthenticated) { isAuthenticated in
             if isAuthenticated {
+                // Initialize encryption manager once after authentication
+                encryptionManager = EncryptionManager(authManager: authManager)
+                // Hide overlay with animation when authenticated
+                withAnimation(.easeOut(duration: 0.2)) {
+                    showAuthOverlay = false
+                }
                 // Only load entries if we don't already have them loaded
                 if entries.isEmpty {
                     loadExistingEntries()
@@ -989,6 +1000,9 @@ struct ContentView: View {
                     // Re-authenticate but keep current state
                     print("Re-authenticated, maintaining current state")
                 }
+            } else {
+                // Show overlay immediately when not authenticated
+                showAuthOverlay = true
             }
         }
         .onChange(of: text) { _ in
@@ -1024,12 +1038,13 @@ struct ContentView: View {
                let currentEntry = entries.first(where: { $0.id == currentId }) {
                 saveEntry(entry: currentEntry)
             }
-            // Clear authentication for security
-            authManager.isAuthenticated = false
+            // Don't immediately clear authentication - do it when becoming active
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            // Immediately trigger authentication when app becomes active
-            if !authManager.isAuthenticated {
+            // Clear authentication and immediately re-authenticate when app becomes active
+            if authManager.isAuthenticated {
+                authManager.isAuthenticated = false
+                // Trigger authentication immediately after clearing
                 Task {
                     await authManager.authenticate()
                 }
@@ -1057,7 +1072,7 @@ struct ContentView: View {
             
             // Try to decrypt the data
             do {
-                content = try encryptionManager.decryptToString(data: encryptedData)
+                content = try encryptionManager!.decryptToString(data: encryptedData)
             } catch {
                 // If decryption fails, try to load as plain text (for backward compatibility)
                 content = try String(contentsOf: fileURL, encoding: .utf8)
@@ -1091,15 +1106,21 @@ struct ContentView: View {
         
         do {
             // Encrypt the text before saving
-            let encryptedData = try encryptionManager.encryptString(text)
+            let encryptedData = try encryptionManager!.encryptString(text)
             print("Successfully encrypted data, size: \(encryptedData.count) bytes")
             
             try encryptedData.write(to: fileURL)
             print("Successfully saved encrypted entry: \(entry.filename)")
             updatePreviewText(for: entry)  // Update preview after saving
         } catch {
-            print("Error saving encrypted entry: \(error)")
+            print("CRITICAL ERROR saving encrypted entry: \(error)")
             print("Error details: \(error.localizedDescription)")
+            
+            // If it's a keychain error, quit the app - we cannot function without secure storage
+            if error.localizedDescription.contains("KeychainError") {
+                print("Keychain error detected - app cannot function without secure key storage")
+                NSApplication.shared.terminate(nil)
+            }
         }
     }
     
@@ -1112,7 +1133,7 @@ struct ContentView: View {
                 let encryptedData = try Data(contentsOf: fileURL)
                 // Try to decrypt the data
                 do {
-                    text = try encryptionManager.decryptToString(data: encryptedData)
+                    text = try encryptionManager!.decryptToString(data: encryptedData)
                     print("Successfully loaded encrypted entry: \(entry.filename)")
                 } catch {
                     // If decryption fails, try to load as plain text (for backward compatibility)
@@ -1262,7 +1283,7 @@ struct ContentView: View {
             
             // Try to decrypt the data
             do {
-                entryContent = try encryptionManager.decryptToString(data: encryptedData)
+                entryContent = try encryptionManager!.decryptToString(data: encryptedData)
             } catch {
                 // If decryption fails, try to load as plain text (for backward compatibility)
                 entryContent = try String(contentsOf: fileURL, encoding: .utf8)

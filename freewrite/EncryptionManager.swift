@@ -18,7 +18,7 @@ class EncryptionManager {
     
     func encrypt(data: Data) throws -> Data {
         print("EncryptionManager: Getting encryption key...")
-        let key = try authManager.getOrCreateEncryptionKey()
+        let key = try authManager.getEncryptionKey()
         print("EncryptionManager: Got encryption key, encrypting data...")
         let sealedBox = try AES.GCM.seal(data, using: key)
         let combined = sealedBox.combined!
@@ -27,7 +27,7 @@ class EncryptionManager {
     }
     
     func decrypt(data: Data) throws -> Data {
-        let key = try authManager.getOrCreateEncryptionKey()
+        let key = try authManager.getEncryptionKey()
         let sealedBox = try AES.GCM.SealedBox(combined: data)
         return try AES.GCM.open(sealedBox, using: key)
     }
